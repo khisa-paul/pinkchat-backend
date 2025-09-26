@@ -1,0 +1,76 @@
+import express from "express";
+import Chat from "../models/Chat.js";
+import User from "../models/User.js";
+
+const router = express.Router();
+
+// ====================
+// Create or get private chat
+// ====================
+router.post("/private", async (req, res) => {
+  const { userId1, userId2 } = req.body;
+
+  if (!userId1 || !userId2) return res.status(400).json({ error: "User IDs required" });
+
+  try {
+    let chat = await Chat.findOne({
+      isGroupChat: false,
+      users: { $all: [userId1, userId2] }
+    }).populate("users", "-password");
+
+    if (!chat) {
+      chat = await Chat.create({
+        chatName: "Private Chat",
+        isGroupChat: false,
+        users: [userId1, userId2]
+      });
+      chat = await chat.populate("users", "-password");
+    }
+
+    res.json(chat);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ====================
+// Create group chat
+// ====================
+router.post("/group", async (req, res) => {
+  const { name, userIds } = req.body; // userIds = array of user IDs
+
+  if (!name || !userIds || userIds.length < 2)
+    return res.status(400).json({ error: "Group name and at least 2 users required" });
+
+  try {
+    let groupChat = await Chat.create({
+      chatName: name,
+      isGroupChat: true,
+      users: userIds
+    });
+
+    groupChat = await groupChat.populate("users", "-password");
+    res.json(groupChat);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ====================
+// Get all chats for a user
+// ====================
+router.get("/:userId", async (req, res) => {
+  const { userId } = req.params;
+
+  try {
+    const chats = await Chat.find({ users: { $in: [userId] } })
+      .populate("users", "-password")
+      .sort({ updatedAt: -1 });
+
+    res.json(chats);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+export default router;
