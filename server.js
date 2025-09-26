@@ -1,95 +1,68 @@
+// server.js
 import express from "express";
-import mongoose from "mongoose";
+import dotenv from "dotenv";
 import cors from "cors";
-import bcrypt from "bcryptjs";
-import jwt from "jsonwebtoken";
-
+import cookieParser from "cookie-parser";
+import morgan from "morgan";
+import { createServer } from "http";
+import { Server } from "socket.io";
 import connectDB from "./db.js";
-import User from "./User.js";
-import Message from "./Message.js";
-import authMiddleware from "./AuthMiddleware.js";
 
+// Load environment variables
+dotenv.config();
+
+// Initialize express app
 const app = express();
-const PORT = process.env.PORT || 5000;
-const JWT_SECRET = process.env.JWT_SECRET || "your_secret_key";
 
-// Middleware
-app.use(cors());
+// Middlewares
 app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+app.use(cookieParser());
+app.use(morgan("dev"));
 
-// Connect DB
+// ✅ Configure CORS properly for frontend
+app.use(
+  cors({
+    origin: process.env.CLIENT_URL || "*", // frontend URL (set in .env for production)
+    credentials: true,
+  })
+);
+
+// Connect MongoDB
 connectDB();
 
-// ==================== AUTH ROUTES ====================
-
-// Register
-app.post("/api/register", async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    if (!username || !password)
-      return res.status(400).json({ error: "All fields required" });
-
-    const existingUser = await User.findOne({ username });
-    if (existingUser)
-      return res.status(400).json({ error: "User already exists" });
-
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    const user = new User({ username, password: hashedPassword });
-    await user.save();
-
-    res.json({ message: "User registered successfully" });
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
+// Simple test route
+app.get("/", (req, res) => {
+  res.send("✅ PinkChat Backend is running!");
 });
 
-// Login
-app.post("/api/login", async (req, res) => {
-  try {
-    const { username, password } = req.body;
-    const user = await User.findOne({ username });
+// Create HTTP server for socket.io
+const httpServer = createServer(app);
 
-    if (!user) return res.status(400).json({ error: "Invalid credentials" });
-
-    const isMatch = await bcrypt.compare(password, user.password);
-    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
-
-    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
-
-    res.json({ token, username: user.username });
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
+// Initialize Socket.io
+const io = new Server(httpServer, {
+  cors: {
+    origin: process.env.CLIENT_URL || "*",
+    methods: ["GET", "POST"],
+  },
 });
 
-// ==================== CHAT ROUTES ====================
+// Handle socket connections
+io.on("connection", (socket) => {
+  console.log("🟢 A user connected:", socket.id);
 
-// Send message
-app.post("/api/messages", authMiddleware, async (req, res) => {
-  try {
-    const { text } = req.body;
-    const message = new Message({ text, sender: req.user.id });
-    await message.save();
+  socket.on("sendMessage", (data) => {
+    console.log("💬 Message received:", data);
+    io.emit("receiveMessage", data); // broadcast to all clients
+  });
 
-    res.json(message);
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
+  socket.on("disconnect", () => {
+    console.log("🔴 User disconnected:", socket.id);
+  });
 });
 
-// Get messages
-app.get("/api/messages", authMiddleware, async (req, res) => {
-  try {
-    const messages = await Message.find().populate("sender", "username");
-    res.json(messages);
-  } catch (err) {
-    res.status(500).json({ error: "Server error" });
-  }
-});
-
-// ==================== START SERVER ====================
-
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
+// Start server
+const PORT = process.env.PORT || 5000;
+httpServer.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
 });
