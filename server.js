@@ -1,140 +1,95 @@
 import express from "express";
-import http from "http";
-import { Server } from "socket.io";
 import mongoose from "mongoose";
 import cors from "cors";
-import multer from "multer";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
-import webpush from "web-push";
 
-import User from "./models/User.js";
-import Message from "./models/Message.js";
-import Status from "./models/Status.js";
+import connectDB from "./db.js";
+import User from "./User.js";
+import Message from "./Message.js";
+import authMiddleware from "./AuthMiddleware.js";
 
 const app = express();
-const server = http.createServer(app);
-const io = new Server(server, { cors: { origin: "*" } });
+const PORT = process.env.PORT || 5000;
+const JWT_SECRET = process.env.JWT_SECRET || "your_secret_key";
 
 // Middleware
 app.use(cors());
 app.use(express.json());
-app.use("/uploads", express.static("uploads"));
 
-// MongoDB connection
-mongoose.connect("mongodb://localhost:27017/pinkchat");
+// Connect DB
+connectDB();
 
-// JWT secret
-const JWT_SECRET = "supersecret";
+// ==================== AUTH ROUTES ====================
 
-// ========== Auth Routes ==========
-app.post("/register", async (req, res) => {
-  const { username, password } = req.body;
-  const hash = await bcrypt.hash(password, 10);
+// Register
+app.post("/api/register", async (req, res) => {
   try {
-    const user = await User.create({ username, password: hash });
-    res.json(user);
+    const { username, password } = req.body;
+    if (!username || !password)
+      return res.status(400).json({ error: "All fields required" });
+
+    const existingUser = await User.findOne({ username });
+    if (existingUser)
+      return res.status(400).json({ error: "User already exists" });
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = new User({ username, password: hashedPassword });
+    await user.save();
+
+    res.json({ message: "User registered successfully" });
   } catch (err) {
-    res.status(400).json({ error: "User already exists" });
+    res.status(500).json({ error: "Server error" });
   }
 });
 
-app.post("/login", async (req, res) => {
-  const { username, password } = req.body;
-  const user = await User.findOne({ username });
-  if (!user) return res.status(400).json({ error: "Invalid credentials" });
+// Login
+app.post("/api/login", async (req, res) => {
+  try {
+    const { username, password } = req.body;
+    const user = await User.findOne({ username });
 
-  const valid = await bcrypt.compare(password, user.password);
-  if (!valid) return res.status(400).json({ error: "Invalid credentials" });
+    if (!user) return res.status(400).json({ error: "Invalid credentials" });
 
-  const token = jwt.sign({ id: user._id }, JWT_SECRET);
-  res.json({ token, username: user.username });
+    const isMatch = await bcrypt.compare(password, user.password);
+    if (!isMatch) return res.status(400).json({ error: "Invalid credentials" });
+
+    const token = jwt.sign({ id: user._id }, JWT_SECRET, { expiresIn: "1h" });
+
+    res.json({ token, username: user.username });
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
-// ========== File Upload (Media + Status) ==========
-const chatStorage = multer.diskStorage({
-  destination: "uploads/chat",
-  filename: (req, file, cb) => cb(null, Date.now() + "-" + file.originalname)
-});
-const statusStorage = multer.diskStorage({
-  destination: "uploads/status",
-  filename: (req, file, cb) => cb(null, Date.now() + "-" + file.originalname)
-});
+// ==================== CHAT ROUTES ====================
 
-const chatUpload = multer({ storage: chatStorage });
-const statusUpload = multer({ storage: statusStorage });
+// Send message
+app.post("/api/messages", authMiddleware, async (req, res) => {
+  try {
+    const { text } = req.body;
+    const message = new Message({ text, sender: req.user.id });
+    await message.save();
 
-app.post("/upload", chatUpload.single("file"), (req, res) => {
-  res.json({ fileUrl: req.file.path });
+    res.json(message);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
-app.post("/status", statusUpload.single("status"), async (req, res) => {
-  const { user } = req.body;
-  const status = await Status.create({ user, filePath: req.file.path });
-  res.json(status);
+// Get messages
+app.get("/api/messages", authMiddleware, async (req, res) => {
+  try {
+    const messages = await Message.find().populate("sender", "username");
+    res.json(messages);
+  } catch (err) {
+    res.status(500).json({ error: "Server error" });
+  }
 });
 
-app.get("/status", async (req, res) => {
-  const statuses = await Status.find().sort({ createdAt: -1 });
-  res.json(statuses);
+// ==================== START SERVER ====================
+
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
 });
-
-// ========== Web Push Setup ==========
-const publicVapidKey = "YOUR_PUBLIC_KEY";
-const privateVapidKey = "YOUR_PRIVATE_KEY";
-
-webpush.setVapidDetails(
-  "mailto:example@yourdomain.org",
-  publicVapidKey,
-  privateVapidKey
-);
-
-let subscriptions = [];
-
-app.post("/subscribe", (req, res) => {
-  const subscription = req.body;
-  subscriptions.push(subscription);
-  res.status(201).json({});
-});
-
-const sendNotification = (message) => {
-  subscriptions.forEach((sub) =>
-    webpush.sendNotification(sub, JSON.stringify(message)).catch(console.error)
-  );
-};
-
-// ========== Socket.IO Events ==========
-io.on("connection", (socket) => {
-  console.log("User connected:", socket.id);
-
-  socket.on("message", async (msg) => {
-    const message = await Message.create(msg);
-    io.emit("message", message);
-
-    sendNotification({
-      title: "New Message",
-      body: `${msg.sender}: ${msg.text || "📎 Media"}`
-    });
-  });
-
-  socket.on("typing", (user) => {
-    socket.broadcast.emit("typing", user);
-  });
-
-  socket.on("stopTyping", (user) => {
-    socket.broadcast.emit("stopTyping", user);
-  });
-
-  socket.on("statusUpdate", (user) => {
-    io.emit("statusUpdate", user);
-
-    sendNotification({
-      title: "New Status Update",
-      body: `${user} posted a new status`
-    });
-  });
-});
-
-// Start server
-const PORT = process.env.PORT || 5000;
-server.listen(PORT, () => console.log(`Backend running on port ${PORT}`));
